@@ -1,342 +1,143 @@
 """
-Utilities for determining application-specific dirs. See <https://github.com/platformdirs/platformdirs> for details and
-usage.
+    pygments.formatters
+    ~~~~~~~~~~~~~~~~~~~
+
+    Pygments formatters.
+
+    :copyright: Copyright 2006-2022 by the Pygments team, see AUTHORS.
+    :license: BSD, see LICENSE for details.
 """
-from __future__ import annotations
 
-import os
+import re
 import sys
-from pathlib import Path
+import types
+from fnmatch import fnmatch
+from os.path import basename
 
-if sys.version_info >= (3, 8):  # pragma: no cover (py38+)
-    from typing import Literal
-else:  # pragma: no cover (py38+)
-    from pip._vendor.typing_extensions import Literal
+from pip._vendor.pygments.formatters._mapping import FORMATTERS
+from pip._vendor.pygments.plugin import find_plugin_formatters
+from pip._vendor.pygments.util import ClassNotFound
 
-from .api import PlatformDirsABC
-from .version import __version__
-from .version import __version_tuple__ as __version_info__
+__all__ = ['get_formatter_by_name', 'get_formatter_for_filename',
+           'get_all_formatters', 'load_formatter_from_file'] + list(FORMATTERS)
 
+_formatter_cache = {}  # classes by name
 
-def _set_platform_dir_class() -> type[PlatformDirsABC]:
-    if sys.platform == "win32":
-        from pip._vendor.platformdirs.windows import Windows as Result
-    elif sys.platform == "darwin":
-        from pip._vendor.platformdirs.macos import MacOS as Result
-    else:
-        from pip._vendor.platformdirs.unix import Unix as Result
-
-    if os.getenv("ANDROID_DATA") == "/data" and os.getenv("ANDROID_ROOT") == "/system":
-
-        if os.getenv("SHELL") or os.getenv("PREFIX"):
-            return Result
-
-        from pip._vendor.platformdirs.android import _android_folder
-
-        if _android_folder() is not None:
-            from pip._vendor.platformdirs.android import Android
-
-            return Android  # return to avoid redefinition of result
-
-    return Result
+def _load_formatters(module_name):
+    """Load a formatter (and all others in the module too)."""
+    mod = __import__(module_name, None, None, ['__all__'])
+    for formatter_name in mod.__all__:
+        cls = getattr(mod, formatter_name)
+        _formatter_cache[cls.name] = cls
 
 
-PlatformDirs = _set_platform_dir_class()  #: Currently active platform
-AppDirs = PlatformDirs  #: Backwards compatibility with appdirs
+def get_all_formatters():
+    """Return a generator for all formatter classes."""
+    # NB: this returns formatter classes, not info like get_all_lexers().
+    for info in FORMATTERS.values():
+        if info[1] not in _formatter_cache:
+            _load_formatters(info[0])
+        yield _formatter_cache[info[1]]
+    for _, formatter in find_plugin_formatters():
+        yield formatter
 
 
-def user_data_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    roaming: bool = False,
-) -> str:
+def find_formatter_class(alias):
+    """Lookup a formatter by alias.
+
+    Returns None if not found.
     """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param roaming: See `roaming <platformdirs.api.PlatformDirsABC.version>`.
-    :returns: data directory tied to the user
+    for module_name, name, aliases, _, _ in FORMATTERS.values():
+        if alias in aliases:
+            if name not in _formatter_cache:
+                _load_formatters(module_name)
+            return _formatter_cache[name]
+    for _, cls in find_plugin_formatters():
+        if alias in cls.aliases:
+            return cls
+
+
+def get_formatter_by_name(_alias, **options):
+    """Lookup and instantiate a formatter by alias.
+
+    Raises ClassNotFound if not found.
     """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, roaming=roaming).user_data_dir
+    cls = find_formatter_class(_alias)
+    if cls is None:
+        raise ClassNotFound("no formatter found for name %r" % _alias)
+    return cls(**options)
 
 
-def site_data_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    multipath: bool = False,
-) -> str:
+def load_formatter_from_file(filename, formattername="CustomFormatter",
+                             **options):
+    """Load a formatter from a file.
+
+    This method expects a file located relative to the current working
+    directory, which contains a class named CustomFormatter. By default,
+    it expects the Formatter to be named CustomFormatter; you can specify
+    your own class name as the second argument to this function.
+
+    Users should be very careful with the input, because this method
+    is equivalent to running eval on the input file.
+
+    Raises ClassNotFound if there are any problems importing the Formatter.
+
+    .. versionadded:: 2.2
     """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param multipath: See `roaming <platformdirs.api.PlatformDirsABC.multipath>`.
-    :returns: data directory shared by users
+    try:
+        # This empty dict will contain the namespace for the exec'd file
+        custom_namespace = {}
+        with open(filename, 'rb') as f:
+            exec(f.read(), custom_namespace)
+        # Retrieve the class `formattername` from that namespace
+        if formattername not in custom_namespace:
+            raise ClassNotFound('no valid %s class found in %s' %
+                                (formattername, filename))
+        formatter_class = custom_namespace[formattername]
+        # And finally instantiate it with the options
+        return formatter_class(**options)
+    except OSError as err:
+        raise ClassNotFound('cannot read %s: %s' % (filename, err))
+    except ClassNotFound:
+        raise
+    except Exception as err:
+        raise ClassNotFound('error when loading custom formatter: %s' % err)
+
+
+def get_formatter_for_filename(fn, **options):
+    """Lookup and instantiate a formatter by filename pattern.
+
+    Raises ClassNotFound if not found.
     """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, multipath=multipath).site_data_dir
+    fn = basename(fn)
+    for modname, name, _, filenames, _ in FORMATTERS.values():
+        for filename in filenames:
+            if fnmatch(fn, filename):
+                if name not in _formatter_cache:
+                    _load_formatters(modname)
+                return _formatter_cache[name](**options)
+    for cls in find_plugin_formatters():
+        for filename in cls.filenames:
+            if fnmatch(fn, filename):
+                return cls(**options)
+    raise ClassNotFound("no formatter found for file name %r" % fn)
 
 
-def user_config_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    roaming: bool = False,
-) -> str:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param roaming: See `roaming <platformdirs.api.PlatformDirsABC.version>`.
-    :returns: config directory tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, roaming=roaming).user_config_dir
+class _automodule(types.ModuleType):
+    """Automatically import formatters."""
+
+    def __getattr__(self, name):
+        info = FORMATTERS.get(name)
+        if info:
+            _load_formatters(info[0])
+            cls = _formatter_cache[info[1]]
+            setattr(self, name, cls)
+            return cls
+        raise AttributeError(name)
 
 
-def site_config_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    multipath: bool = False,
-) -> str:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param multipath: See `roaming <platformdirs.api.PlatformDirsABC.multipath>`.
-    :returns: config directory shared by the users
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, multipath=multipath).site_config_dir
-
-
-def user_cache_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    opinion: bool = True,
-) -> str:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param opinion: See `roaming <platformdirs.api.PlatformDirsABC.opinion>`.
-    :returns: cache directory tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, opinion=opinion).user_cache_dir
-
-
-def user_state_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    roaming: bool = False,
-) -> str:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param roaming: See `roaming <platformdirs.api.PlatformDirsABC.version>`.
-    :returns: state directory tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, roaming=roaming).user_state_dir
-
-
-def user_log_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    opinion: bool = True,
-) -> str:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param opinion: See `roaming <platformdirs.api.PlatformDirsABC.opinion>`.
-    :returns: log directory tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, opinion=opinion).user_log_dir
-
-
-def user_documents_dir() -> str:
-    """
-    :returns: documents directory tied to the user
-    """
-    return PlatformDirs().user_documents_dir
-
-
-def user_runtime_dir(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    opinion: bool = True,
-) -> str:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param opinion: See `opinion <platformdirs.api.PlatformDirsABC.opinion>`.
-    :returns: runtime directory tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, opinion=opinion).user_runtime_dir
-
-
-def user_data_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    roaming: bool = False,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param roaming: See `roaming <platformdirs.api.PlatformDirsABC.version>`.
-    :returns: data path tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, roaming=roaming).user_data_path
-
-
-def site_data_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    multipath: bool = False,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param multipath: See `multipath <platformdirs.api.PlatformDirsABC.multipath>`.
-    :returns: data path shared by users
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, multipath=multipath).site_data_path
-
-
-def user_config_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    roaming: bool = False,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param roaming: See `roaming <platformdirs.api.PlatformDirsABC.version>`.
-    :returns: config path tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, roaming=roaming).user_config_path
-
-
-def site_config_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    multipath: bool = False,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param multipath: See `roaming <platformdirs.api.PlatformDirsABC.multipath>`.
-    :returns: config path shared by the users
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, multipath=multipath).site_config_path
-
-
-def user_cache_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    opinion: bool = True,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param opinion: See `roaming <platformdirs.api.PlatformDirsABC.opinion>`.
-    :returns: cache path tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, opinion=opinion).user_cache_path
-
-
-def user_state_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    roaming: bool = False,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param roaming: See `roaming <platformdirs.api.PlatformDirsABC.version>`.
-    :returns: state path tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, roaming=roaming).user_state_path
-
-
-def user_log_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    opinion: bool = True,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param opinion: See `roaming <platformdirs.api.PlatformDirsABC.opinion>`.
-    :returns: log path tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, opinion=opinion).user_log_path
-
-
-def user_documents_path() -> Path:
-    """
-    :returns: documents path tied to the user
-    """
-    return PlatformDirs().user_documents_path
-
-
-def user_runtime_path(
-    appname: str | None = None,
-    appauthor: str | None | Literal[False] = None,
-    version: str | None = None,
-    opinion: bool = True,
-) -> Path:
-    """
-    :param appname: See `appname <platformdirs.api.PlatformDirsABC.appname>`.
-    :param appauthor: See `appauthor <platformdirs.api.PlatformDirsABC.appauthor>`.
-    :param version: See `version <platformdirs.api.PlatformDirsABC.version>`.
-    :param opinion: See `opinion <platformdirs.api.PlatformDirsABC.opinion>`.
-    :returns: runtime path tied to the user
-    """
-    return PlatformDirs(appname=appname, appauthor=appauthor, version=version, opinion=opinion).user_runtime_path
-
-
-__all__ = [
-    "__version__",
-    "__version_info__",
-    "PlatformDirs",
-    "AppDirs",
-    "PlatformDirsABC",
-    "user_data_dir",
-    "user_config_dir",
-    "user_cache_dir",
-    "user_state_dir",
-    "user_log_dir",
-    "user_documents_dir",
-    "user_runtime_dir",
-    "site_data_dir",
-    "site_config_dir",
-    "user_data_path",
-    "user_config_path",
-    "user_cache_path",
-    "user_state_path",
-    "user_log_path",
-    "user_documents_path",
-    "user_runtime_path",
-    "site_data_path",
-    "site_config_path",
-]
+oldmod = sys.modules[__name__]
+newmod = _automodule(__name__)
+newmod.__dict__.update(oldmod.__dict__)
+sys.modules[__name__] = newmod
+del newmod.newmod, newmod.oldmod, newmod.sys, newmod.types
