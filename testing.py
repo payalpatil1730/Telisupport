@@ -1,301 +1,331 @@
-import typing as t
+# testing.py
+
 from contextlib import contextmanager
-from contextlib import ExitStack
-from copy import copy
-from types import TracebackType
-from urllib.parse import urlsplit
+import typing
 
-import werkzeug.test
-from click.testing import CliRunner
-from werkzeug.test import Client
-from werkzeug.wrappers import Request as BaseRequest
-
-from .cli import ScriptInfo
-from .sessions import SessionMixin
-
-if t.TYPE_CHECKING:  # pragma: no cover
-    from werkzeug.test import TestResponse
-
-    from .app import Flask
+from .core import (
+    ParserElement,
+    ParseException,
+    Keyword,
+    __diag__,
+    __compat__,
+)
 
 
-class EnvironBuilder(werkzeug.test.EnvironBuilder):
-    """An :class:`~werkzeug.test.EnvironBuilder`, that takes defaults from the
-    application.
-
-    :param app: The Flask application to configure the environment from.
-    :param path: URL path being requested.
-    :param base_url: Base URL where the app is being served, which
-        ``path`` is relative to. If not given, built from
-        :data:`PREFERRED_URL_SCHEME`, ``subdomain``,
-        :data:`SERVER_NAME`, and :data:`APPLICATION_ROOT`.
-    :param subdomain: Subdomain name to append to :data:`SERVER_NAME`.
-    :param url_scheme: Scheme to use instead of
-        :data:`PREFERRED_URL_SCHEME`.
-    :param json: If given, this is serialized as JSON and passed as
-        ``data``. Also defaults ``content_type`` to
-        ``application/json``.
-    :param args: other positional arguments passed to
-        :class:`~werkzeug.test.EnvironBuilder`.
-    :param kwargs: other keyword arguments passed to
-        :class:`~werkzeug.test.EnvironBuilder`.
+class pyparsing_test:
+    """
+    namespace class for classes useful in writing unit tests
     """
 
-    def __init__(
-        self,
-        app: "Flask",
-        path: str = "/",
-        base_url: t.Optional[str] = None,
-        subdomain: t.Optional[str] = None,
-        url_scheme: t.Optional[str] = None,
-        *args: t.Any,
-        **kwargs: t.Any,
-    ) -> None:
-        assert not (base_url or subdomain or url_scheme) or (
-            base_url is not None
-        ) != bool(
-            subdomain or url_scheme
-        ), 'Cannot pass "subdomain" or "url_scheme" with "base_url".'
-
-        if base_url is None:
-            http_host = app.config.get("SERVER_NAME") or "localhost"
-            app_root = app.config["APPLICATION_ROOT"]
-
-            if subdomain:
-                http_host = f"{subdomain}.{http_host}"
-
-            if url_scheme is None:
-                url_scheme = app.config["PREFERRED_URL_SCHEME"]
-
-            url = urlsplit(path)
-            base_url = (
-                f"{url.scheme or url_scheme}://{url.netloc or http_host}"
-                f"/{app_root.lstrip('/')}"
-            )
-            path = url.path
-
-            if url.query:
-                sep = b"?" if isinstance(url.query, bytes) else "?"
-                path += sep + url.query
-
-        self.app = app
-        super().__init__(path, base_url, *args, **kwargs)
-
-    def json_dumps(self, obj: t.Any, **kwargs: t.Any) -> str:  # type: ignore
-        """Serialize ``obj`` to a JSON-formatted string.
-
-        The serialization will be configured according to the config associated
-        with this EnvironBuilder's ``app``.
+    class reset_pyparsing_context:
         """
-        return self.app.json.dumps(obj, **kwargs)
+        Context manager to be used when writing unit tests that modify pyparsing config values:
+        - packrat parsing
+        - bounded recursion parsing
+        - default whitespace characters.
+        - default keyword characters
+        - literal string auto-conversion class
+        - __diag__ settings
 
+        Example::
 
-class FlaskClient(Client):
-    """Works like a regular Werkzeug test client but has knowledge about
-    Flask's contexts to defer the cleanup of the request context until
-    the end of a ``with`` block. For general information about how to
-    use this class refer to :class:`werkzeug.test.Client`.
+            with reset_pyparsing_context():
+                # test that literals used to construct a grammar are automatically suppressed
+                ParserElement.inlineLiteralsUsing(Suppress)
 
-    .. versionchanged:: 0.12
-       `app.test_client()` includes preset default environment, which can be
-       set after instantiation of the `app.test_client()` object in
-       `client.environ_base`.
+                term = Word(alphas) | Word(nums)
+                group = Group('(' + term[...] + ')')
 
-    Basic usage is outlined in the :doc:`/testing` chapter.
-    """
+                # assert that the '()' characters are not included in the parsed tokens
+                self.assertParseAndCheckList(group, "(abc 123 def)", ['abc', '123', 'def'])
 
-    application: "Flask"
-
-    def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.preserve_context = False
-        self._new_contexts: t.List[t.ContextManager[t.Any]] = []
-        self._context_stack = ExitStack()
-        self.environ_base = {
-            "REMOTE_ADDR": "127.0.0.1",
-            "HTTP_USER_AGENT": f"werkzeug/{werkzeug.__version__}",
-        }
-
-    @contextmanager
-    def session_transaction(
-        self, *args: t.Any, **kwargs: t.Any
-    ) -> t.Generator[SessionMixin, None, None]:
-        """When used in combination with a ``with`` statement this opens a
-        session transaction.  This can be used to modify the session that
-        the test client uses.  Once the ``with`` block is left the session is
-        stored back.
-
-        ::
-
-            with client.session_transaction() as session:
-                session['value'] = 42
-
-        Internally this is implemented by going through a temporary test
-        request context and since session handling could depend on
-        request variables this function accepts the same arguments as
-        :meth:`~flask.Flask.test_request_context` which are directly
-        passed through.
+            # after exiting context manager, literals are converted to Literal expressions again
         """
-        # new cookie interface for Werkzeug >= 2.3
-        cookie_storage = self._cookies if hasattr(self, "_cookies") else self.cookie_jar
 
-        if cookie_storage is None:
-            raise TypeError(
-                "Cookies are disabled. Create a client with 'use_cookies=True'."
-            )
+        def __init__(self):
+            self._save_context = {}
 
-        app = self.application
-        ctx = app.test_request_context(*args, **kwargs)
+        def save(self):
+            self._save_context["default_whitespace"] = ParserElement.DEFAULT_WHITE_CHARS
+            self._save_context["default_keyword_chars"] = Keyword.DEFAULT_KEYWORD_CHARS
 
-        if hasattr(self, "_add_cookies_to_wsgi"):
-            self._add_cookies_to_wsgi(ctx.request.environ)
-        else:
-            self.cookie_jar.inject_wsgi(ctx.request.environ)  # type: ignore[union-attr]
+            self._save_context[
+                "literal_string_class"
+            ] = ParserElement._literalStringClass
 
-        with ctx:
-            sess = app.session_interface.open_session(app, ctx.request)
+            self._save_context["verbose_stacktrace"] = ParserElement.verbose_stacktrace
 
-        if sess is None:
-            raise RuntimeError("Session backend did not open a session.")
-
-        yield sess
-        resp = app.response_class()
-
-        if app.session_interface.is_null_session(sess):
-            return
-
-        with ctx:
-            app.session_interface.save_session(app, sess, resp)
-
-        if hasattr(self, "_update_cookies_from_response"):
-            try:
-                # Werkzeug>=2.3.3
-                self._update_cookies_from_response(
-                    ctx.request.host.partition(":")[0],
-                    ctx.request.path,
-                    resp.headers.getlist("Set-Cookie"),
-                )
-            except TypeError:
-                # Werkzeug>=2.3.0,<2.3.3
-                self._update_cookies_from_response(  # type: ignore[call-arg]
-                    ctx.request.host.partition(":")[0],
-                    resp.headers.getlist("Set-Cookie"),  # type: ignore[arg-type]
-                )
-        else:
-            # Werkzeug<2.3.0
-            self.cookie_jar.extract_wsgi(  # type: ignore[union-attr]
-                ctx.request.environ, resp.headers
-            )
-
-    def _copy_environ(self, other):
-        out = {**self.environ_base, **other}
-
-        if self.preserve_context:
-            out["werkzeug.debug.preserve_context"] = self._new_contexts.append
-
-        return out
-
-    def _request_from_builder_args(self, args, kwargs):
-        kwargs["environ_base"] = self._copy_environ(kwargs.get("environ_base", {}))
-        builder = EnvironBuilder(self.application, *args, **kwargs)
-
-        try:
-            return builder.get_request()
-        finally:
-            builder.close()
-
-    def open(
-        self,
-        *args: t.Any,
-        buffered: bool = False,
-        follow_redirects: bool = False,
-        **kwargs: t.Any,
-    ) -> "TestResponse":
-        if args and isinstance(
-            args[0], (werkzeug.test.EnvironBuilder, dict, BaseRequest)
-        ):
-            if isinstance(args[0], werkzeug.test.EnvironBuilder):
-                builder = copy(args[0])
-                builder.environ_base = self._copy_environ(builder.environ_base or {})
-                request = builder.get_request()
-            elif isinstance(args[0], dict):
-                request = EnvironBuilder.from_environ(
-                    args[0], app=self.application, environ_base=self._copy_environ({})
-                ).get_request()
+            self._save_context["packrat_enabled"] = ParserElement._packratEnabled
+            if ParserElement._packratEnabled:
+                self._save_context[
+                    "packrat_cache_size"
+                ] = ParserElement.packrat_cache.size
             else:
-                # isinstance(args[0], BaseRequest)
-                request = copy(args[0])
-                request.environ = self._copy_environ(request.environ)
-        else:
-            # request is None
-            request = self._request_from_builder_args(args, kwargs)
+                self._save_context["packrat_cache_size"] = None
+            self._save_context["packrat_parse"] = ParserElement._parse
+            self._save_context[
+                "recursion_enabled"
+            ] = ParserElement._left_recursion_enabled
 
-        # Pop any previously preserved contexts. This prevents contexts
-        # from being preserved across redirects or multiple requests
-        # within a single block.
-        self._context_stack.close()
+            self._save_context["__diag__"] = {
+                name: getattr(__diag__, name) for name in __diag__._all_names
+            }
 
-        response = super().open(
-            request,
-            buffered=buffered,
-            follow_redirects=follow_redirects,
-        )
-        response.json_module = self.application.json  # type: ignore[assignment]
+            self._save_context["__compat__"] = {
+                "collect_all_And_tokens": __compat__.collect_all_And_tokens
+            }
 
-        # Re-push contexts that were preserved during the request.
-        while self._new_contexts:
-            cm = self._new_contexts.pop()
-            self._context_stack.enter_context(cm)
+            return self
 
-        return response
+        def restore(self):
+            # reset pyparsing global state
+            if (
+                ParserElement.DEFAULT_WHITE_CHARS
+                != self._save_context["default_whitespace"]
+            ):
+                ParserElement.set_default_whitespace_chars(
+                    self._save_context["default_whitespace"]
+                )
 
-    def __enter__(self) -> "FlaskClient":
-        if self.preserve_context:
-            raise RuntimeError("Cannot nest client invocations")
-        self.preserve_context = True
-        return self
+            ParserElement.verbose_stacktrace = self._save_context["verbose_stacktrace"]
 
-    def __exit__(
-        self,
-        exc_type: t.Optional[type],
-        exc_value: t.Optional[BaseException],
-        tb: t.Optional[TracebackType],
-    ) -> None:
-        self.preserve_context = False
-        self._context_stack.close()
+            Keyword.DEFAULT_KEYWORD_CHARS = self._save_context["default_keyword_chars"]
+            ParserElement.inlineLiteralsUsing(
+                self._save_context["literal_string_class"]
+            )
 
+            for name, value in self._save_context["__diag__"].items():
+                (__diag__.enable if value else __diag__.disable)(name)
 
-class FlaskCliRunner(CliRunner):
-    """A :class:`~click.testing.CliRunner` for testing a Flask app's
-    CLI commands. Typically created using
-    :meth:`~flask.Flask.test_cli_runner`. See :ref:`testing-cli`.
-    """
+            ParserElement._packratEnabled = False
+            if self._save_context["packrat_enabled"]:
+                ParserElement.enable_packrat(self._save_context["packrat_cache_size"])
+            else:
+                ParserElement._parse = self._save_context["packrat_parse"]
+            ParserElement._left_recursion_enabled = self._save_context[
+                "recursion_enabled"
+            ]
 
-    def __init__(self, app: "Flask", **kwargs: t.Any) -> None:
-        self.app = app
-        super().__init__(**kwargs)
+            __compat__.collect_all_And_tokens = self._save_context["__compat__"]
 
-    def invoke(  # type: ignore
-        self, cli: t.Any = None, args: t.Any = None, **kwargs: t.Any
-    ) -> t.Any:
-        """Invokes a CLI command in an isolated environment. See
-        :meth:`CliRunner.invoke <click.testing.CliRunner.invoke>` for
-        full method documentation. See :ref:`testing-cli` for examples.
+            return self
 
-        If the ``obj`` argument is not given, passes an instance of
-        :class:`~flask.cli.ScriptInfo` that knows how to load the Flask
-        app being tested.
+        def copy(self):
+            ret = type(self)()
+            ret._save_context.update(self._save_context)
+            return ret
 
-        :param cli: Command object to invoke. Default is the app's
-            :attr:`~flask.app.Flask.cli` group.
-        :param args: List of strings to invoke the command with.
+        def __enter__(self):
+            return self.save()
 
-        :return: a :class:`~click.testing.Result` object.
+        def __exit__(self, *args):
+            self.restore()
+
+    class TestParseResultsAsserts:
         """
-        if cli is None:
-            cli = self.app.cli  # type: ignore
+        A mixin class to add parse results assertion methods to normal unittest.TestCase classes.
+        """
 
-        if "obj" not in kwargs:
-            kwargs["obj"] = ScriptInfo(create_app=lambda: self.app)
+        def assertParseResultsEquals(
+            self, result, expected_list=None, expected_dict=None, msg=None
+        ):
+            """
+            Unit test assertion to compare a :class:`ParseResults` object with an optional ``expected_list``,
+            and compare any defined results names with an optional ``expected_dict``.
+            """
+            if expected_list is not None:
+                self.assertEqual(expected_list, result.as_list(), msg=msg)
+            if expected_dict is not None:
+                self.assertEqual(expected_dict, result.as_dict(), msg=msg)
 
-        return super().invoke(cli, args, **kwargs)
+        def assertParseAndCheckList(
+            self, expr, test_string, expected_list, msg=None, verbose=True
+        ):
+            """
+            Convenience wrapper assert to test a parser element and input string, and assert that
+            the resulting ``ParseResults.asList()`` is equal to the ``expected_list``.
+            """
+            result = expr.parse_string(test_string, parse_all=True)
+            if verbose:
+                print(result.dump())
+            else:
+                print(result.as_list())
+            self.assertParseResultsEquals(result, expected_list=expected_list, msg=msg)
+
+        def assertParseAndCheckDict(
+            self, expr, test_string, expected_dict, msg=None, verbose=True
+        ):
+            """
+            Convenience wrapper assert to test a parser element and input string, and assert that
+            the resulting ``ParseResults.asDict()`` is equal to the ``expected_dict``.
+            """
+            result = expr.parse_string(test_string, parseAll=True)
+            if verbose:
+                print(result.dump())
+            else:
+                print(result.as_list())
+            self.assertParseResultsEquals(result, expected_dict=expected_dict, msg=msg)
+
+        def assertRunTestResults(
+            self, run_tests_report, expected_parse_results=None, msg=None
+        ):
+            """
+            Unit test assertion to evaluate output of ``ParserElement.runTests()``. If a list of
+            list-dict tuples is given as the ``expected_parse_results`` argument, then these are zipped
+            with the report tuples returned by ``runTests`` and evaluated using ``assertParseResultsEquals``.
+            Finally, asserts that the overall ``runTests()`` success value is ``True``.
+
+            :param run_tests_report: tuple(bool, [tuple(str, ParseResults or Exception)]) returned from runTests
+            :param expected_parse_results (optional): [tuple(str, list, dict, Exception)]
+            """
+            run_test_success, run_test_results = run_tests_report
+
+            if expected_parse_results is not None:
+                merged = [
+                    (*rpt, expected)
+                    for rpt, expected in zip(run_test_results, expected_parse_results)
+                ]
+                for test_string, result, expected in merged:
+                    # expected should be a tuple containing a list and/or a dict or an exception,
+                    # and optional failure message string
+                    # an empty tuple will skip any result validation
+                    fail_msg = next(
+                        (exp for exp in expected if isinstance(exp, str)), None
+                    )
+                    expected_exception = next(
+                        (
+                            exp
+                            for exp in expected
+                            if isinstance(exp, type) and issubclass(exp, Exception)
+                        ),
+                        None,
+                    )
+                    if expected_exception is not None:
+                        with self.assertRaises(
+                            expected_exception=expected_exception, msg=fail_msg or msg
+                        ):
+                            if isinstance(result, Exception):
+                                raise result
+                    else:
+                        expected_list = next(
+                            (exp for exp in expected if isinstance(exp, list)), None
+                        )
+                        expected_dict = next(
+                            (exp for exp in expected if isinstance(exp, dict)), None
+                        )
+                        if (expected_list, expected_dict) != (None, None):
+                            self.assertParseResultsEquals(
+                                result,
+                                expected_list=expected_list,
+                                expected_dict=expected_dict,
+                                msg=fail_msg or msg,
+                            )
+                        else:
+                            # warning here maybe?
+                            print("no validation for {!r}".format(test_string))
+
+            # do this last, in case some specific test results can be reported instead
+            self.assertTrue(
+                run_test_success, msg=msg if msg is not None else "failed runTests"
+            )
+
+        @contextmanager
+        def assertRaisesParseException(self, exc_type=ParseException, msg=None):
+            with self.assertRaises(exc_type, msg=msg):
+                yield
+
+    @staticmethod
+    def with_line_numbers(
+        s: str,
+        start_line: typing.Optional[int] = None,
+        end_line: typing.Optional[int] = None,
+        expand_tabs: bool = True,
+        eol_mark: str = "|",
+        mark_spaces: typing.Optional[str] = None,
+        mark_control: typing.Optional[str] = None,
+    ) -> str:
+        """
+        Helpful method for debugging a parser - prints a string with line and column numbers.
+        (Line and column numbers are 1-based.)
+
+        :param s: tuple(bool, str - string to be printed with line and column numbers
+        :param start_line: int - (optional) starting line number in s to print (default=1)
+        :param end_line: int - (optional) ending line number in s to print (default=len(s))
+        :param expand_tabs: bool - (optional) expand tabs to spaces, to match the pyparsing default
+        :param eol_mark: str - (optional) string to mark the end of lines, helps visualize trailing spaces (default="|")
+        :param mark_spaces: str - (optional) special character to display in place of spaces
+        :param mark_control: str - (optional) convert non-printing control characters to a placeholding
+                                 character; valid values:
+                                 - "unicode" - replaces control chars with Unicode symbols, such as "␍" and "␊"
+                                 - any single character string - replace control characters with given string
+                                 - None (default) - string is displayed as-is
+
+        :return: str - input string with leading line numbers and column number headers
+        """
+        if expand_tabs:
+            s = s.expandtabs()
+        if mark_control is not None:
+            if mark_control == "unicode":
+                tbl = str.maketrans(
+                    {c: u for c, u in zip(range(0, 33), range(0x2400, 0x2433))}
+                    | {127: 0x2421}
+                )
+                eol_mark = ""
+            else:
+                tbl = str.maketrans(
+                    {c: mark_control for c in list(range(0, 32)) + [127]}
+                )
+            s = s.translate(tbl)
+        if mark_spaces is not None and mark_spaces != " ":
+            if mark_spaces == "unicode":
+                tbl = str.maketrans({9: 0x2409, 32: 0x2423})
+                s = s.translate(tbl)
+            else:
+                s = s.replace(" ", mark_spaces)
+        if start_line is None:
+            start_line = 1
+        if end_line is None:
+            end_line = len(s)
+        end_line = min(end_line, len(s))
+        start_line = min(max(1, start_line), end_line)
+
+        if mark_control != "unicode":
+            s_lines = s.splitlines()[start_line - 1 : end_line]
+        else:
+            s_lines = [line + "␊" for line in s.split("␊")[start_line - 1 : end_line]]
+        if not s_lines:
+            return ""
+
+        lineno_width = len(str(end_line))
+        max_line_len = max(len(line) for line in s_lines)
+        lead = " " * (lineno_width + 1)
+        if max_line_len >= 99:
+            header0 = (
+                lead
+                + "".join(
+                    "{}{}".format(" " * 99, (i + 1) % 100)
+                    for i in range(max(max_line_len // 100, 1))
+                )
+                + "\n"
+            )
+        else:
+            header0 = ""
+        header1 = (
+            header0
+            + lead
+            + "".join(
+                "         {}".format((i + 1) % 10)
+                for i in range(-(-max_line_len // 10))
+            )
+            + "\n"
+        )
+        header2 = lead + "1234567890" * (-(-max_line_len // 10)) + "\n"
+        return (
+            header1
+            + header2
+            + "\n".join(
+                "{:{}d}:{}{}".format(i, lineno_width, line, eol_mark)
+                for i, line in enumerate(s_lines, start=start_line)
+            )
+            + "\n"
+        )
