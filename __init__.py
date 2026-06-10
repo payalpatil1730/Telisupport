@@ -1,62 +1,38 @@
-# -*- coding: utf-8 -*-
-"""
-The root of the greenlet package.
-"""
+from __future__ import annotations
 
-__all__ = [
-    '__version__',
-    '_C_API',
+import typing as t
 
-    'GreenletExit',
-    'error',
+from .encoding import base64_decode as base64_decode
+from .encoding import base64_encode as base64_encode
+from .encoding import want_bytes as want_bytes
+from .exc import BadData as BadData
+from .exc import BadHeader as BadHeader
+from .exc import BadPayload as BadPayload
+from .exc import BadSignature as BadSignature
+from .exc import BadTimeSignature as BadTimeSignature
+from .exc import SignatureExpired as SignatureExpired
+from .serializer import Serializer as Serializer
+from .signer import HMACAlgorithm as HMACAlgorithm
+from .signer import NoneAlgorithm as NoneAlgorithm
+from .signer import Signer as Signer
+from .timed import TimedSerializer as TimedSerializer
+from .timed import TimestampSigner as TimestampSigner
+from .url_safe import URLSafeSerializer as URLSafeSerializer
+from .url_safe import URLSafeTimedSerializer as URLSafeTimedSerializer
 
-    'getcurrent',
-    'greenlet',
 
-    'gettrace',
-    'settrace',
-]
+def __getattr__(name: str) -> t.Any:
+    if name == "__version__":
+        import importlib.metadata
+        import warnings
 
-# pylint:disable=no-name-in-module
+        warnings.warn(
+            "The '__version__' attribute is deprecated and will be removed in"
+            " ItsDangerous 2.3. Use feature detection or"
+            " 'importlib.metadata.version(\"itsdangerous\")' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return importlib.metadata.version("itsdangerous")
 
-###
-# Metadata
-###
-__version__ = '3.5.1'
-from ._greenlet import _C_API # pylint:disable=no-name-in-module
-
-###
-# Exceptions
-###
-from ._greenlet import GreenletExit
-from ._greenlet import error
-
-###
-# greenlets
-###
-from ._greenlet import getcurrent
-from ._greenlet import greenlet
-
-###
-# tracing
-###
-from ._greenlet import gettrace
-from ._greenlet import settrace
-
-###
-# Constants
-# These constants aren't documented and aren't recommended.
-# In 1.0, USE_GC and USE_TRACING are always true, and USE_CONTEXT_VARS
-# is the same as ``sys.version_info[:2] >= 3.7``
-###
-from ._greenlet import GREENLET_USE_CONTEXT_VARS # pylint:disable=unused-import
-from ._greenlet import GREENLET_USE_GC # pylint:disable=unused-import
-from ._greenlet import GREENLET_USE_TRACING # pylint:disable=unused-import
-
-# Controlling the use of the gc module. Provisional API for this greenlet
-# implementation in 2.0.
-from ._greenlet import CLOCKS_PER_SEC # pylint:disable=unused-import
-from ._greenlet import enable_optional_cleanup # pylint:disable=unused-import
-from ._greenlet import get_clocks_used_doing_optional_cleanup # pylint:disable=unused-import
-
-# Other APIS in the _greenlet module are for test support.
+    raise AttributeError(name)
